@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sound Node Player</title>
+  <style>
+  </style>
+</head>
+<body>
+  <button onclick="playSoundExample()">Play Sound</button>
+  <button onclick="playSongExample()">Play Song</button>
+<script>
+const nodeData = {ctx:new AudioContext()};
+let currentSound = null;
+let currentSong = null;
+const noteList = {'a0':27.5,'a#0':29.14,'b0':30.87,'c1':32.7,'c#1':34.65,'d1':36.71,'d#1':38.89,'e1':41.2,'f1':43.65,'f#1':46.25,'g1':49,'g#1':51.91,'a1':55,'a#1':58.27,'b1':61.74,'c2':65.41,'c#2':69.3,'d2':73.42,'d#2':77.78,'e2':82.41,'f2':87.31,'f#2':92.5,'g2':98,'g#2':103.83,'a2':110,'a#2':116.54,'b2':123.47,'c3':130.81,'c#3':138.59,'d3':146.83,'d#3':155.56,'e3':164.81,'f3':174.61,'f#3':185,'g3':196,'g#3':207.65,'a3':220,'a#3':233.08,'b3':246.94,'c4':261.63,'c#4':277.18,'d4':293.66,'d#4':311.13,'e4':329.63,'f4':349.23,'f#4':369.99,'g4':392,'g#4':415.3,'a4':440,'a#4':466.16,'b4':493.88,'c5':523.25,'c#5':554.37,'d5':587.33,'d#5':622.25,'e5':659.25,'f5':698.46,'f#5':739.99,'g5':783.99,'g#5':830.61,'a5':880,'a#5':932.33,'b5':987.77,'c6':1046.5,'c#6':1108.73,'d6':1174.66,'d#6':1244.51,'e6':1318.51,'f6':1396.91,'f#6':1479.98,'g6':1567.98,'g#6':1661.22,'a6':1760,'a#6':1864.66,'b6':1975.53,'c7':2093,'c#7':2217.46,'d7':2349.32,'d#7':2489.02,'e7':2637.02,'f7':2793.83,'f#7':2959.96,'g7':3135.96,'g#7':3322.44,'a7':3520,'a#7':3729.31,'b7':3951.07,'c8':4186.01};
+let graphNodes = {};
+let graphNodesMix = {};
+let tempo = 105;
+let beatDuration = beatFromTempo(tempo);
+
+function beatFromTempo(tempo){return (60 / tempo);}
+
+function generateId() {return Math.random().toString(36).substr(2, 9);}
+
+function addToGraphNodes(nodeGroup, ctxNode, id){ nodeGroup[id] = ctxNode;}
+
+function calculateSongDuration(){
+  let songDuration = 0;
+  currentSong.tracks.forEach(track => {
+    let arrangement = track.arrangement.sort((a, b) => a.beat - b.beat);
+    if(track.loop.mode === 'loop'){
+      track.virtualArrangement = createVirtualArrangement(track); //store here so you can display and render as track
+      if(track.virtualArrangement.length !=0) arrangement = track.virtualArrangement;
+    }
+    const lastNote = arrangement[arrangement.length-1];
+    const trackDuration = (lastNote.beat + lastNote.envelopeLength - 1) * beatDuration;
+    if(songDuration<trackDuration) songDuration = trackDuration;
+  });
+  songDuration += 2; //add extra 2 seconds for  buffer
+  return songDuration;
+}
+
+function createVirtualArrangement(track){
+  const arrangement = track.arrangement;
+  const virtualArrangement = [];
+  let beatStart = 0;
+  const loopedSegment = arrangement.filter(n => n.beat >= track.loop.start && n.beat < track.loop.end);
+  for(let i=0; i<track.loop.qty; i++){
+    loopedSegment.forEach(note =>{
+      const newNote =  {...note}; 
+      newNote.beat = newNote.beat + beatStart;
+      newNote.id = 'virtual_' + generateId();
+      virtualArrangement.push(newNote)
+    });
+    beatStart += (track.loop.end-track.loop.start);
+  }
+  return virtualArrangement;
+ }
+
+function convertBeatsToSeconds(start, note){
+  const noteClone = cloneObject(note)
+  noteClone.duration = (noteClone.envelopeLength * beatDuration);  
+  noteClone.time = start + (noteClone.beat * beatDuration); 
+  return noteClone;
+}
+
+function cloneObject(obj, changeId){
+  const clone = JSON.parse(JSON.stringify(obj));
+  if(changeId) clone.id = generateId();
+  return clone;
+}
+
+function stopSound(buildId){
+  Object.keys(graphNodes).forEach(key =>{
+    if(key.includes(buildId) || buildId==='all' ){
+      graphNodes[key].disconnect();
+      delete graphNodes[key]; 
+    }
+  });
+}
+
+function jsonToFloat32(obj){
+  const length = Object.keys(obj).length;
+  const arr = new Float32Array(length);
+  for (let i = 0; i < length; i++) {
+    arr[i] = obj[i];
+  }
+  return arr;
+}
+
+function unison(baseFreq, numVoices, shapeType, curve, oscillator1, oscillator2){
+  const detuneAmount = 0.015; // ±1.5% range
+  const gainValue = 0.7/numVoices;
+  const voices = [];
+  let shaped;
+  for (let i = 0; i < numVoices; i++) {
+    const norm = i / (numVoices - 1);
+    const linear = (norm - 0.5) * 2; 
+    const panValue = (i / (numVoices - 1)) * 2 - 1;
+    if(shapeType === 'power'){
+      shaped = Math.sign(linear) * Math.pow(Math.abs(linear), curve);
+    }else if(shapeType === 'tanh'){
+      shaped = Math.tanh(linear * gainValue);
+    }else if(shapeType === 'sinh'){
+      shaped = Math.sinh(linear * gainValue) / Math.sinh(gainValue);
+    }else if(shapeType === 'cubic'){
+      shaped = linear ** 3;
+    }else{
+      shaped = linear;
+    }
+    const detune = shaped * detuneAmount;
+    const frequency = baseFreq * (1 + detune);
+    const oscillatorType = (i % 2 === 0)? oscillator2:oscillator1;
+    const phaseOffset = Math.random() / baseFreq; 
+    voices.push({frequency, gainValue, panValue, phaseOffset, oscillatorType});
+  }
+  return voices
+}
+
+function buildGraph(buildId, frequency, note, trackGainInfo){
+  sound = currentSound;
+  let nodeGroup = graphNodes;
+  const time = nodeData.ctx.currentTime;
+  let audionode;
+  currentSound.nodes.forEach(node =>{
+    let id = (buildId)? `${buildId}_${node.id}`:node.id;
+    audionode = null;
+    if(node.type === 'oscillator'){
+      audionode = nodeData.ctx.createOscillator();
+      const frequency = node.parameters.frequency.value;
+      node.lfo = (frequency<30)? true:false; //is it an lfo?
+      audionode.type = node.parameters.type.value;
+      audionode.frequency.setValueAtTime(frequency, time);
+    }else if(node.type === 'gain'){
+      audionode = nodeData.ctx.createGain();
+      audionode.gain.setValueAtTime(node.parameters.gain.value, time);
+    }else if(node.type === 'filter' || node.type ==='biquadfilter'){
+      audionode = nodeData.ctx.createBiquadFilter();
+      audionode.type = node.parameters.type.value;
+      audionode.frequency.setValueAtTime(node.parameters.frequency.value, time);
+      audionode.Q.setValueAtTime(node.parameters.Q.value, time);
+      audionode.detune.setValueAtTime(node.parameters.detune.value, time);
+      audionode.gain.setValueAtTime(node.parameters.gain.value, time);
+    }else if(node.type === 'stereopanner'){
+      audionode = nodeData.ctx.createStereoPanner();
+      audionode.pan.setValueAtTime(node.parameters.pan.value, time);
+    }else if(node.type === 'delay'){
+      audionode = nodeData.ctx.createDelay();
+      audionode.delayTime.setValueAtTime(node.parameters.delayTime.value, time);
+    }else if(node.type === 'channelsplitter'){
+      audionode = nodeData.ctx.createChannelSplitter(2);
+    }else if(node.type === 'channelmerger'){
+      audionode = nodeData.ctx.createChannelMerger(2);
+    }else if(node.type === 'constantsource'){
+      audionode = nodeData.ctx.createConstantSource();
+      audionode.offset.setValueAtTime(node.parameters.offset.value, time);
+    }else if(node.type === 'waveshaper'){
+      audionode = nodeData.ctx.createWaveShaper();
+      let curve = node.parameters.curve.value;
+      let oversample =  node.parameters.oversample.value;
+      if(!(curve instanceof Float32Array)){
+        curve = jsonToFloat32(curve);
+        node.parameters.curve.value = curve;
+      }
+      audionode.curve = curve;
+      if(oversample==='2x' || oversample==='4x'){
+        audionode.oversample = oversample;
+      }
+    }else if(node.type === 'bufferSource'){
+      audionode = nodeData.ctx.createBufferSource();
+      audionode.playbackRate.setValueAtTime(node.parameters.playbackRate.value, time);
+      audionode.detune.setValueAtTime(node.parameters.detune.value, time);
+    }else if(node.type === 'periodicwave'){
+      const real = new Float32Array(node.parameters.real.value);
+      const imaginary = new Float32Array(node.parameters.imaginary.value);
+      const wave = nodeData.ctx.createPeriodicWave(real, imaginary);
+      audionode = nodeData.ctx.createOscillator();
+      audionode.setPeriodicWave(wave);
+    }else if(node.type === 'convolver'){
+      audionode = nodeData.ctx.createConvolver();
+      const impulse = node.parameters.impulse.value;
+      const duration = node.parameters.duration.value;
+      const decay = node.parameters.decay.value;
+      const tone = node.parameters.tone.value;
+      const preDelay = node.parameters.preDelay.value;
+      // Only create if there is no impulse or params have changed
+      if (!reverb.buffer instanceof AudioBuffer || reverb.impulse!=impulse || reverb.duration!=duration || reverb.decay!=decay || reverb.tone!=tone || reverb.preDelay!=preDelay) {
+        reverb.buffer = createInternalImpulse(duration, decay, tone, preDelay);
+        Object.assign(reverb, {impulse,duration,decay,tone,preDelay});
+      }
+      audionode.buffer = reverb.buffer;
+    }else if(node.type === 'panner'){
+      audionode = nodeData.ctx.createPanner();
+      audionode.positionX.setValueAtTime(node.parameters.positionX.value, time);
+      audionode.positionY.setValueAtTime(node.parameters.positionY.value, time);
+      audionode.positionZ.setValueAtTime(node.parameters.positionZ.value, time);
+      audionode.orientationX.setValueAtTime(node.parameters.orientationX.value, time);
+      audionode.orientationY.setValueAtTime(node.parameters.orientationY.value, time);
+      audionode.orientationZ.setValueAtTime(node.parameters.orientationZ.value, time);
+    }else if(node.type === 'allnodes'){ //treat as gain
+      audionode = nodeData.ctx.createGain();
+      audionode.gain.setValueAtTime(1, time);
+      if(sound.isMasterBus) masterConnect = audionode;
+    }else if(node.type === 'dynamicscompressor'){
+      audionode = nodeData.ctx.createDynamicsCompressor();
+      audionode.threshold.setValueAtTime(node.parameters.threshold.value, time);
+      audionode.knee.setValueAtTime(node.parameters.knee.value, time);
+      audionode.ratio.setValueAtTime(node.parameters.ratio.value, time);
+      audionode.attack.setValueAtTime(node.parameters.attack.value, time);
+      audionode.release.setValueAtTime(node.parameters.release.value, time);
+    }else if(node.type === 'noise'){
+      audionode = nodeData.ctx.createBufferSource();
+      audionode.buffer = whiteNoise();
+      audionode.playbackRate.setValueAtTime(node.parameters.playbackRate.value, time);
+      audionode.detune.setValueAtTime(node.parameters.detune.value, time);
+      audionode.loop = true;
+    }else if(node.type === 'lfo'){
+      const lfoOsc = nodeData.ctx.createOscillator();
+      lfoOsc.type = node.parameters.type.value;
+      lfoOsc.frequency.setValueAtTime(node.parameters.frequency.value, time);
+      addToGraphNodes(nodeGroup, lfoOsc, id + '_oscillator'); //extension declared in definition
+      audionode = nodeData.ctx.createGain();
+      audionode.gain.setValueAtTime(node.parameters.gain.value, time);
+      lfoOsc.connect(audionode);
+      lfoOsc.start();
+    }else if(node.type === 'frequencymodulation'){
+      //const frequency = Number(node.parameters.frequency.value);
+      const osc2Freqx = Number(node.parameters.osc2Freqx.value);
+      const osc3Freqx = Number(node.parameters.osc3Freqx.value);
+      const osc4Freqx = Number(node.parameters.osc4Freqx.value);
+      const osc2Gainr = Number(node.parameters.osc2Gainr.value);
+      const osc3Gainr =  Number(node.parameters.osc3Gainr.value);
+      const osc4Gainr = Number(node.parameters.osc4Gainr.value);
+      const op1 = nodeData.ctx.createOscillator();
+      op1.frequency.setValueAtTime(frequency, time);
+      op1.type = node.parameters.type.value;
+      const op2 = nodeData.ctx.createOscillator();
+      op2.frequency.setValueAtTime(frequency * osc2Freqx, time);
+      const op3 = nodeData.ctx.createOscillator();
+      op3.frequency.setValueAtTime(frequency * osc3Freqx, time);
+      const op4 = nodeData.ctx.createOscillator();
+      op4.frequency.setValueAtTime(frequency * osc4Freqx, time);
+      const op1Gain = nodeData.ctx.createGain();
+      const op2Gain = nodeData.ctx.createGain();
+      const op3Gain = nodeData.ctx.createGain();
+      const op4Gain = nodeData.ctx.createGain();
+      setModIndexFromBeta(op4Gain, op4, osc4Gainr);
+      setModIndexFromBeta(op3Gain, op3, osc3Gainr);
+      setModIndexFromBeta(op2Gain, op2, osc2Gainr);
+      op1.connect(op1Gain);
+      op2.connect(op2Gain);
+      op3.connect(op3Gain);
+      op4.connect(op4Gain);
+      op1Gain.gain.value = 0.3;
+      op2Gain.connect(op1.frequency);
+      op3Gain.connect(op2.frequency);
+      op4Gain.connect(op3.frequency);
+      op1.start(note.time);
+      op2.start(note.time);
+      op3.start(note.time);
+      op4.start(note.time);
+      op1.stop(note.time + note.duration);
+      op2.stop(note.time + note.duration);
+      op3.stop(note.time + note.duration);
+      op4.stop(note.time + note.duration);
+      // Feedback on 3
+      const fb = nodeData.ctx.createGain();
+      fb.gain.value = 0.2;
+      op3.connect(fb);
+      fb.connect(op3.frequency);
+      audionode = op1Gain;
+    }else if(node.type === 'modalsynthesis'){
+      audionode = nodeData.ctx.createGain();
+      audionode.gain.value = 1;
+      const modes = node.parameters.modeData.value;
+      let maxDecay = 0;
+      for (const m of modes) {
+        if(m.decay > maxDecay) maxDecay = m.decay;
+      };
+      const output = nodeData.ctx.createGain();
+      output.gain.value = 1/modes.length;
+      output.connect(audionode);
+      for (const m of modes) {
+        const osc = nodeData.ctx.createOscillator();
+        const gain = nodeData.ctx.createGain();
+        osc.frequency.value = frequency * m.ratio;
+        // Strike envelope
+        gain.gain.setValueAtTime(0.0001, note.time);
+        gain.gain.exponentialRampToValueAtTime(1.0, note.time + 0.005); // attack
+        const newDecay = (m.decay/maxDecay) * note.duration;
+        gain.gain.exponentialRampToValueAtTime(0.0001, note.time + newDecay); // decay
+        osc.connect(gain);
+        gain.connect(output);
+        osc.start(note.time);
+        osc.stop(note.time + m.decay + 0.1);
+      }
+    }else if(node.type === 'cosinewave'){
+      const real = new Float32Array([0, 1]);  // cosine term
+      const imag = new Float32Array([0, 0]);  // no sine term
+      const cosWave = nodeData.ctx.createPeriodicWave(real, imag);
+      const frequency = (node.parameters.useNoteFrequency.value)? noteList[note.title]:node.parameters.frequency.value;
+      audionode = nodeData.ctx.createOscillator();
+      audionode.setPeriodicWave(cosWave);
+      audionode.type = node.parameters.type.value;
+      audionode.frequency.value = frequency;
+      audionode.start(note.time);
+      audionode.stop(note.time + note.duration);
+    }else if(node.type === 'mixer'){
+      audionode = nodeData.ctx.createGain();
+      audionode.gain.setValueAtTime(node.parameters.gain.value, time);
+      const gain1 = nodeData.ctx.createGain();
+      gain1.gain.setValueAtTime(node.parameters.gain1.value, time);
+      const gain2 = nodeData.ctx.createGain();
+      gain2.gain.setValueAtTime(node.parameters.gain2.value, time);
+      addToGraphNodes(nodeGroup, gain1, id + '_gain1');
+      addToGraphNodes(nodeGroup, gain2, id + '_gain2');
+      gain1.connect(audionode);
+      gain2.connect(audionode);
+    }else if(node.type === 'multivoice'){
+      audionode = nodeData.ctx.createGain();
+      audionode.gain.setValueAtTime(0.7, time);
+      const voiceList = unison(
+        frequency,
+        node.parameters.numberOfVoices.value,
+        node.parameters.shape.value,
+        node.parameters.curve.value,
+        node.parameters.oscillator1.value,
+        node.parameters.oscillator2.value);
+       voiceList.forEach(voice => {
+         const osc = new OscillatorNode(nodeData.ctx, { type: voice.oscillatorType, frequency: voice.frequency });
+         osc.start(note.time + voice.phaseOffset);
+         osc.stop(note.time + note.duration + voice.phaseOffset);
+         //create panner
+         const pan = nodeData.ctx.createStereoPanner();
+         pan.pan.setValueAtTime(voice.panValue, time);
+         //create gain
+         const gain = new GainNode(nodeData.ctx, {gain: voice.gainValue});
+         osc.connect(pan).connect(gain)
+         gain.connect(audionode);
+         osc.onended = () => {
+           pan.disconnect();
+           gain.disconnect()
+         }
+      });
+    }else if(node.type === 'adsr'){
+      //
+    }else if(node.type === 'destination'){
+      audionode = nodeData.ctx.destination;
+    }
+
+    if(audionode){
+        addToGraphNodes(nodeGroup, audionode, id);
+    }
+  });
+
+  // Connect graph nodes
+  currentSound.nodes.forEach(node =>{
+    const id = (buildId)? `${buildId}_${node.id}`:node.id;
+    let channelNumber = 0;
+    const connectFromNode = nodeGroup[id];
+    node.connections.forEach(connection =>{
+      const includesInput = connection.destParam.includes('input');
+      const connectToId = (buildId)? `${buildId}_${connection.id}`:connection.id;
+      let connectToNode = nodeGroup[connectToId];
+      if(connectToNode instanceof AudioDestinationNode){
+        if(sound.isMasterBus){
+          connectFromNode.connect(connectToNode); //standard connect to destination
+          return;
+        }
+        if(trackGainInfo){
+          if(!graphNodesMix[trackGainInfo.id]){
+            const trackGain  = nodeData.ctx.createGain();
+            trackGain.gain.setValueAtTime(trackGainInfo.gain, time);
+            graphNodesMix[trackGainInfo.id] = trackGain;
+            connectFromNode.connect(trackGain);
+            trackGain.connect(nodeData.ctx.destination);
+          }else{
+            const trackGain = graphNodesMix[trackGainInfo.id];
+            connectFromNode.connect(trackGain);
+            trackGain.connect(nodeData.ctx.destination);
+          }
+        }else{
+          connectFromNode.connect(nodeData.ctx.destination);
+        }
+      }else if(connectToNode instanceof ChannelMergerNode){
+        const channelNumber = Number(connection.destParam.replace('input', ''));
+        //if not from splitter output will only be zero
+        connectFromNode.connect(connectToNode, 0, channelNumber);
+        //}
+      } else if(node.type==='channelsplitter'){
+        const channelNumber = Number(connection.startParam.replace('output', ''));
+        connectFromNode.connect(connectToNode, channelNumber);
+      } else if(node.type==='adsr'){
+        //
+      }else{
+        const connectTo = (buildId)? `${buildId}_${connection.id}`:connection.id;
+        if(includesInput){
+         const connectFrom = id;
+          nodeGroup[connectFrom].connect(nodeGroup[connectTo]);
+        }else{
+          nodeGroup[id].connect(nodeGroup[connectTo][connection.destParam]);
+        }
+      }
+    });
+  });
+}
+
+function playSound(note, trackGainInfo){
+  const buildId = generateId();
+  let osc, buffer;
+  if(!note) note = {title:'d4', time:nodeData.ctx.currentTime, duration:2};
+  const frequency = noteList[note.title];
+  const time = note.time;
+  buildGraph(buildId, frequency, note, trackGainInfo);
+  let noteDuration = Number(note.duration);  
+  const defaultNote = (currentSound.defaultNote)? currentSound.defaultNote:'a4';
+  const minDuration = (currentSound.minDuration)? Number(currentSound.minDuration):0;
+  const maxDuration = (currentSound.maxDuration)? Number(currentSound.maxDuration):0;
+  if(note.duration<minDuration) noteDuration = minDuration;
+  if(note.duration>maxDuration && maxDuration!==0) noteDuration = maxDuration;
+  currentSound.nodes.forEach(node => {
+    if(node.type==='adsr'){
+      node.connections.forEach(connection =>{
+      const adsrConnect = graphNodes[`${buildId}_${connection.id}`];
+      if(connection.destParam === 'gain'){
+        adsrConnect.gain.setValueAtTime(0, nodeData.ctx.currentTime);       }
+      const ampMax = Number(node.parameters.ampMax.value);
+      const ampMin = Number(node.parameters.ampMin.value);
+      node.parameters.points.value.forEach((point, index) => {
+        let adsrValue = Number(point.amp) * (ampMax + ampMin);
+        if(adsrValue===0) adsrValue = 0.001; //exponential curve requires non 0
+        const adsrTime =  time + (noteDuration * Number(point.time)); 
+        if(point.line==='set'){
+          adsrConnect[connection.destParam].setValueAtTime(adsrValue, adsrTime);
+        }else if(point.line==='curve'){
+          adsrConnect[connection.destParam].exponentialRampToValueAtTime(adsrValue, adsrTime); 
+        }else{
+          adsrConnect[connection.destParam].linearRampToValueAtTime(adsrValue, adsrTime); 
+        }
+      });
+    });
+    }else if(node.type==='oscillator' || node.type==='periodicwave'){
+      osc = graphNodes[`${buildId}_${node.id}`];
+      osc.start(time);
+      if(!node.lfo){ // more than 30 hZ
+        osc.frequency.setValueAtTime(frequency, time);
+      }
+    }else if(node.type==='gain'){
+      // 
+    }else if(node.type==='noise'){
+      buffer = graphNodes[`${buildId}_${node.id}`];
+    }else if(node.type==='waveshaper'){
+      //
+    }
+  });
+  if(buffer){
+    buffer.start(time);
+    buffer.stop(time + noteDuration + 0.05);
+  }
+  if(!osc){
+    osc = nodeData.ctx.createOscillator();
+    osc.start();
+  }
+  osc.stop(time + noteDuration + 0.05);
+    osc.onended = () => {
+    stopSound(buildId);
+  }
+  return buildId;
+}
+
+function clearGraphNodesMix(){
+  Object.values(graphNodesMix).forEach(node => {
+    node.disconnect();
+  });
+  graphNodesMix = {}; 
+}
+
+// --- Song Functions ---
+ async function playCurrentSong(mode){
+  clearGraphNodesMix();
+  nodeData.mode = mode;
+  const songDuration = calculateSongDuration();
+  const allNotes = [];
+  const originalSoundId =  nodeData.currentSoundId;
+  currentSong.tracks.forEach(track => {
+    if(!track.mute){
+      let arrangement = track.arrangement
+      if(track.loop.mode === 'loop' && track.virtualArrangement.length!=0) arrangement = track.virtualArrangement;
+      currentSound = track.sounds[0];
+      arrangement.forEach(note =>{
+       const convertedNote = convertBeatsToSeconds(nodeData.ctx.currentTime, note);
+       playSound(convertedNote, {id:track.id, gain:track.gain});
+       allNotes.push(convertedNote)
+      });
+    }
+  });
+  updateSound(originalSoundId);
+}
+
+function playSoundExample(){
+  //Export sound and replace here
+  currentSound = {"title":"Sci Fi","nodes":[{"id":"uflbckqfx","title":"Oscillator","type":"oscillator","position":{"x":264,"y":18},"connections":[{"id":"jb5qsr5ya","startParam":"output","destParam":"input"}],"parameters":{"type":{"value":"sine","param":"type","label":"Type","ext":""},"frequency":{"value":"0.15","param":"frequency","label":"Frequency","ext":""},"detune":{"value":0,"param":"detune","label":"Detune","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}},"lfo":true},{"id":"jb5qsr5ya","title":"Gain","type":"gain","position":{"x":463.0000305175781,"y":218},"connections":[{"id":"n3l8903zn","startParam":"gain","destParam":"gain"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":"0.1","param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"20165zfr2","title":"Destination","type":"destination","position":{"x":1750,"y":191},"connections":[],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""}}},{"id":"2mgsofm5c","title":"Oscillator","type":"oscillator","position":{"x":15,"y":225},"connections":[{"id":"3p7gnzx1w","startParam":"output","destParam":"input"}],"parameters":{"type":{"value":"triangle","param":"type","label":"Type","ext":""},"frequency":{"value":"3","param":"frequency","label":"Frequency","ext":""},"detune":{"value":0,"param":"detune","label":"Detune","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}},"lfo":true},{"id":"3p7gnzx1w","title":"Gain","type":"gain","position":{"x":554.0000305175781,"y":415},"connections":[{"id":"2beudk9h3","startParam":"gain","destParam":"pan"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":"0.7","param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"05wneq3tk","title":"Oscillator","type":"oscillator","position":{"x":600,"y":1},"connections":[{"id":"n3l8903zn","startParam":"output","destParam":"input"}],"parameters":{"type":{"value":"sine","param":"type","label":"Type","ext":""},"frequency":{"value":"146","param":"frequency","label":"Frequency","ext":""},"detune":{"value":0,"param":"detune","label":"Detune","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}},"lfo":false},{"id":"2beudk9h3","title":"Stereo Panner","type":"stereopanner","position":{"x":1210,"y":280},"connections":[{"id":"1wnv6ugca","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"pan":{"value":0,"param":"pan","label":"Pan","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"zwibmyrc6","title":"Filter","type":"filter","position":{"x":1061,"y":18},"connections":[{"id":"2beudk9h3","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"type":{"value":"lowpass","param":"type","label":"Type","ext":""},"frequency":{"value":"147","param":"frequency","label":"Frequency","ext":""},"Q":{"value":"18","param":"Q","label":"Q","ext":""},"gain":{"value":"0.2","param":"gain","label":"Gain","ext":""},"detune":{"value":0,"param":"detune","label":"Detune","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"n3l8903zn","title":"Gain","type":"gain","position":{"x":815,"y":290},"connections":[{"id":"zwibmyrc6","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":0.5,"param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"9tqk9qu08","title":"ADSR","type":"adsr","position":{"x":152,"y":400},"connections":[{"id":"jb5qsr5ya","startParam":"output","destParam":"gain"},{"id":"3p7gnzx1w","startParam":"output","destParam":"gain"}],"parameters":{"points":{"value":[{"time":0,"amp":0.001,"point":"point","line":"line"},{"time":0.217,"amp":0.826,"point":"point","line":"line"},{"time":0.4,"amp":0.376,"point":"point","line":"line"},{"time":0.889,"amp":0.497,"point":"point","line":"line"},{"time":1,"amp":0,"point":"point","line":"line"}],"param":"points","label":"ADSR Points","ext":"","display":"none"},"ampMin":{"value":0,"param":"ampMin","label":"Amp Min","ext":""},"ampMax":{"value":"0.7","param":"ampMax","label":"Amp Max","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"1wnv6ugca","title":"Gain","type":"gain","position":{"x":1509,"y":185},"connections":[{"id":"20165zfr2","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":0.5,"param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"254k4ki8h","title":"ADSR","type":"adsr","position":{"x":1207,"y":414},"connections":[{"id":"1wnv6ugca","startParam":"output","destParam":"gain"}],"parameters":{"presets":{"value":"organDrone","param":"presets","label":"Presets","ext":"","io":""},"points":{"value":[{"time":0,"amp":1,"point":"point","line":"line"},{"time":0.99,"amp":1,"point":"point","line":"line"},{"time":1,"amp":0.001,"point":"point","line":"line"}],"param":"points","label":"ADSR Points","ext":"","display":"none"},"ampMin":{"value":0,"param":"ampMin","label":"Amp Min","ext":""},"ampMax":{"value":1,"param":"ampMax","label":"Amp Max","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}}],"settings":[],"id":"0hlaesanq","location":"sound","zoom":1,"minDuration":"0","maxDuration":"0","defaultNote":"d2"}
+  //Note duration is limited by currentSound minDuration-maxDuration
+  //currentSound.minDuration = 0;
+  //currentSound.maxDuration = 0;
+  note = {title: 'e3', time: nodeData.ctx.currentTime, duration: 3}
+  playSound(note);
+}
+
+function playSongExample(){
+  //Export song and replace here
+  currentSong = {"title":"Cosine Age","musicGenre":"rock","tempo":105,"tracks":[{"title":"Phrasef4","sounds":[{"title":"Cosine LFO","nodes":[{"id":"sanx7cvlo","title":"Oscillator","type":"oscillator","position":{"x":465,"y":85},"connections":[{"id":"rlgp10s8w","startParam":"output","destParam":"input"}],"parameters":{"type":{"value":"sine","param":"type","label":"Type","ext":""},"frequency":{"value":440,"param":"frequency","label":"Frequency","ext":""},"detune":{"value":0,"param":"detune","label":"Detune","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}},"lfo":false},{"id":"a6liz8vfh","title":"ADSR","type":"adsr","position":{"x":799,"y":308},"connections":[{"id":"kgqnfwxcd","startParam":"output","destParam":"gain"}],"parameters":{"presets":{"value":"standard","param":"presets","label":"Presets","ext":"","io":""},"points":{"value":[{"time":0,"amp":0.001,"point":"point","line":"line"},{"time":0.17,"amp":0.9,"point":"point","line":"line"},{"time":0.3,"amp":0.42,"point":"point","line":"line"},{"time":0.74,"amp":0.42,"point":"point","line":"line"},{"time":1,"amp":0.001,"point":"point","line":"line"}],"param":"points","label":"ADSR Points","ext":"","display":"none"},"ampMin":{"value":0,"param":"ampMin","label":"Amp Min","ext":""},"ampMax":{"value":1,"param":"ampMax","label":"Amp Max","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"rlgp10s8w","title":"Gain","type":"gain","position":{"x":796,"y":173},"connections":[{"id":"kgqnfwxcd","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":0.5,"param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"gmycax5vj","title":"Destination","type":"destination","position":{"x":1325,"y":170},"connections":[],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""}}},{"id":"1caelb5xc","title":"Gain","type":"gain","position":{"x":464,"y":252},"connections":[],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":"0.5","param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"qvj4q3k80","title":"LFO","type":"lfo","position":{"x":470,"y":395},"connections":[{"id":"rlgp10s8w","startParam":"output","destParam":"gain"}],"parameters":{"type":{"value":"sine","param":"type","label":"Type","ext":"oscillator"},"frequency":{"value":10,"param":"frequency","label":"Frequency","ext":"oscillator"},"detune":{"value":0,"param":"detune","label":"Detune","ext":"oscillator"},"gain":{"value":0.5,"param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"kgqnfwxcd","title":"Gain","type":"gain","position":{"x":1070,"y":173},"connections":[{"id":"gmycax5vj","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":0.5,"param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}}, {"id":"382b8edx3","title":"Cosine Wave","type":"cosinewave","position":{"x":116,"y":392},"connections":[{"id":"1caelb5xc","startParam":"output","destParam":"gain"}],"parameters":{"type":{"value":"sine","param":"type","label":"Type","ext":"","io":""},"useNoteFrequency":{"value":false,"param":"useNoteFrequency","label":"Use Note Freq","ext":"","io":""},"frequency":{"value":"10","param":"frequency","label":"Frequency","ext":"","io":"i"},"detune":{"value":0,"param":"detune","label":"Detune","ext":"","io":"i"},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}}],"settings":[],"id":"vtz02etfu","defaltNote":"a4","minDuration":"0","maxDuration":0,"location":"song","zoom":1,"isMasterBus":false}],"arrangement":[{"title":"e4","frequency":329.63,"beat":1,"envelopeLength":0.8,"chord":"note","id":"q2y7f2d5a","trackId":"bjf3bbaj8"},{"title":"f3","frequency":174.61,"beat":1.8,"envelopeLength":1.2000000000000002,"chord":"note","id":"g758tekgw","trackId":"bjf3bbaj8"},{"title":"d4","frequency":293.66,"beat":3,"envelopeLength":1.2000000000000002,"chord":"note","id":"1wod55adw","trackId":"bjf3bbaj8"},{"title":"a3","frequency":220,"beat":4.2,"envelopeLength":0.8,"chord":"note","id":"p5sulfec4","trackId":"bjf3bbaj8"},{"title":"c4","frequency":261.63,"beat":5,"envelopeLength":0.4,"chord":"note","id":"0mx41rzib","trackId":"bjf3bbaj8"},{"title":"e4","frequency":329.63,"beat":6,"envelopeLength":0.8,"chord":"note","id":"yy23supao","trackId":"bjf3bbaj8"},{"title":"c4","frequency":261.63,"beat":6.8,"envelopeLength":1.2000000000000002,"chord":"note","id":"5bct2w353","trackId":"bjf3bbaj8"},{"title":"d4","frequency":293.66,"beat":8,"envelopeLength":1.2000000000000002,"chord":"note","id":"wd8tbfz4c","trackId":"bjf3bbaj8"},{"title":"a3","frequency":220,"beat":9.2,"envelopeLength":0.8,"chord":"note","id":"6h7rhf2gc","trackId":"bjf3bbaj8"},{"title":"f3","frequency":174.61,"beat":10,"envelopeLength":0.4,"chord":"note","id":"winclur8w","trackId":"bjf3bbaj8"},{"title":"e4","frequency":329.63,"beat":11,"envelopeLength":0.8,"chord":"note","id":"vwacx392s","trackId":"bjf3bbaj8"},{"title":"a3","frequency":220,"beat":11.8,"envelopeLength":1.2000000000000002,"chord":"note","id":"zjzme3ne1","trackId":"bjf3bbaj8"},{"title":"d4","frequency":293.66,"beat":13,"envelopeLength":1.2000000000000002,"chord":"note","id":"fsp15wyck","trackId":"bjf3bbaj8"},{"title":"c4","frequency":261.63,"beat":14.2,"envelopeLength":0.4,"chord":"note","id":"99b4rnb9v","trackId":"bjf3bbaj8"},{"title":"f3","frequency":174.61,"beat":14.6,"envelopeLength":0.8,"chord":"note","id":"o32njp622","trackId":"bjf3bbaj8"}],"virtualArrangement":[],"loop":{"mode":"off","start":1,"end":2,"qty":1},"gain":0.8,"on":true,"mute":false,"id":"bjf3bbaj8","color":"#c6c47c"},{"title":"track1","sounds":[{"title":"Kick Drum","nodes":[{"id":"d5sj03wex","title":"Oscillator","type":"oscillator","position":{"x":340,"y":11},"connections":[{"id":"nbfv67bmt","startParam":"output","destParam":"input"}],"parameters":{"type":{"value":"sine","param":"type","label":"Type","ext":""},"frequency":{"value":"140","param":"frequency","label":"Frequency","ext":""},"detune":{"value":"0","param":"detune","label":"Detune","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}},"lfo":false},{"id":"nbfv67bmt","title":"Gain","type":"gain","position":{"x":684,"y":10},"connections":[{"id":"qfwccmdwk","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":"0.5","param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"x031ve5dq","title":"Destination","type":"destination","position":{"x":1304,"y":102},"connections":[],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""}}},{"id":"qfwccmdwk","title":"Filter","type":"filter","position":{"x":983,"y":149},"connections":[{"id":"x031ve5dq","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"type":{"value":"lowpass","param":"type","label":"Type","ext":""},"frequency":{"value":"800","param":"frequency","label":"Frequency","ext":""},"Q":{"value":1,"param":"Q","label":"Q","ext":""},"gain":{"value":0.5,"param":"gain","label":"Gain","ext":""},"detune":{"value":0,"param":"detune","label":"Detune","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"hehs3kng8","title":"ADSR","type":"adsr","position":{"x":341,"y":231},"connections":[{"id":"nbfv67bmt","startParam":"output","destParam":"gain"}],"parameters":{"points":{"value":[{"time":"0.003","amp":"0","point":"point","line":"line"},{"time":"0.01","amp":"0.988","point":"point","line":"curve"},{"time":0.344,"amp":0.001,"point":"point","line":"curve"},{"time":0.894,"amp":0,"point":"point","line":"line"},{"time":0.997,"amp":0.001,"point":"point","line":"line"}],"param":"points","label":"ADSR Points","ext":"","display":"none"},"ampMin":{"value":"0","param":"ampMin","label":"Amp Min","ext":""},"ampMax":{"value":"1","param":"ampMax","label":"Amp Max","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}},{"id":"30ru8bjhr","title":"ADSR","type":"adsr","position":{"x":11,"y":226},"connections":[{"id":"d5sj03wex","startParam":"output","destParam":"detune"}],"parameters":{"points":{"value":[{"time":0.003,"amp":0.001,"point":"point","line":"line"},{"time":0.481,"amp":0.997,"point":"point","line":"line"},{"time":0.561,"amp":0.993,"point":"point","line":"line"},{"time":0.781,"amp":0.993,"point":"point","line":"line"},{"time":1,"amp":0.993,"point":"point","line":"line"}],"param":"points","label":"ADSR Points","ext":"","display":"none"},"ampMin":{"value":"0","param":"ampMin","label":"Amp Min","ext":""},"ampMax":{"value":"-4000","param":"ampMax","label":"Amp Max","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":""}}}],"settings":[],"id":"3taw5r6jp","minDuration":"3","defaultNote":"d2","location":"song","zoom":1}],"arrangement":[{"title":"d2","beat":1,"envelopeLength":1,"chord":"note","id":"jce0hjxfj","trackId":"0rocnbitt"}],"virtualArrangement":[{"title":"d2","beat":1,"envelopeLength":1,"chord":"note","id":"virtual_vgf8zpv5g","trackId":"0rocnbitt"},{"title":"d2","beat":2,"envelopeLength":1,"chord":"note","id":"virtual_9cmb8a33l","trackId":"0rocnbitt"},{"title":"d2","beat":3,"envelopeLength":1,"chord":"note","id":"virtual_bactjjk7j","trackId":"0rocnbitt"},{"title":"d2","beat":4,"envelopeLength":1,"chord":"note","id":"virtual_myj13kbkk","trackId":"0rocnbitt"},{"title":"d2","beat":5,"envelopeLength":1,"chord":"note","id":"virtual_687cwewsu","trackId":"0rocnbitt"},{"title":"d2","beat":6,"envelopeLength":1,"chord":"note","id":"virtual_psalcw38i","trackId":"0rocnbitt"},{"title":"d2","beat":7,"envelopeLength":1,"chord":"note","id":"virtual_6w9xufbif","trackId":"0rocnbitt"},{"title":"d2","beat":8,"envelopeLength":1,"chord":"note","id":"virtual_6z7q5fuyr","trackId":"0rocnbitt"},{"title":"d2","beat":9,"envelopeLength":1,"chord":"note","id":"virtual_w0umby4g7","trackId":"0rocnbitt"},{"title":"d2","beat":10,"envelopeLength":1,"chord":"note","id":"virtual_ifjv721ib","trackId":"0rocnbitt"}],"loop":{"mode":"loop","start":1,"end":2,"qty":10},"gain":0.8,"on":true,"mute":false,"id":"0rocnbitt","color":"#c6c47c"}],"masterBus":{"title":"Master Bus","nodes":[{"id":"jh9tm0xlm","title":"All Nodes","type":"allnodes","position":{"x":170,"y":225},"connections":[{"id":"whtn0ul7a","startParam":"output","destParam":"input"}],"parameters":{"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"whtn0ul7a","title":"Dynamics Compressor","type":"dynamicscompressor","position":{"x":555,"y":135},"connections":[{"id":"jdhoir6vl","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"threshold":{"value":-12,"param":"threshold","label":"Threshold","ext":""},"knee":{"value":30,"param":"knee","label":"Knee","ext":""},"ratio":{"value":12,"param":"ratio","label":"Ratio","ext":""},"attack":{"value":0.003,"param":"attack","label":"Attack","ext":""},"release":{"value":0.25,"param":"release","label":"Release","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"jdhoir6vl","title":"Gain","type":"gain","position":{"x":970,"y":155},"connections":[{"id":"bfg7vmn3d","startParam":"output","destParam":"input"}],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""},"gain":{"value":0.5,"param":"gain","label":"Gain","ext":""},"output":{"value":"io","param":"output","label":"Output","ext":"","io":"o"}}},{"id":"bfg7vmn3d","title":"Destination","type":"destination","position":{"x":1310,"y":155},"connections":[],"parameters":{"input":{"value":"io","param":"input","label":"Input","ext":""}}}],"settings":[],"id":"4qv3529n3","defaltNote":"a4","minDuration":0,"maxDuration":0,"location":"sound","zoom":1,"isMasterBus":true},"id":"xaaj8mc66","zoom":1,"pan":0};
+  playCurrentSong('context')
+}
+
+</script>
+</body>
+</html>
