@@ -4,6 +4,8 @@ This project is new and requires better documentation, instructional videos, and
 
 Try it here: https://zr3d.github.io/soundnode/
 
+To install download the index.html file and open in your browser, alternatively download the project via the "<> Code" Button, unzip the project folder and then open the index.html file in your default browser.
+
 Report bugs here: https://github.com/ZR3D/soundnode/issues
 
 You can create individual or instrument sounds in the node editor and incorporate them into playable multi-track songs.
