@@ -1,8 +1,10 @@
 SoundNode is a visual node editor for the Web Audio API.
 
-Try it here https://zr3d.github.io/soundnode/
+This project is new and requires better documentation, instructional videos, and will certainly have bugs.
 
-This project is new and requires better documentation, instructional videos, issue-reporting, and will certainly have bugs.
+Try it here: https://zr3d.github.io/soundnode/
+
+Report bugs here: https://github.com/ZR3D/soundnode/issues
 
 You can create individual or instrument sounds in the node editor and incorporate them into playable multi-track songs.
 
