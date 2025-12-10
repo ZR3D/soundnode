@@ -1,0 +1,50 @@
+name: 🐛 Bug report
+description: Report something that isn’t behaving as it should
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug!
+
+  - type: input
+    id: summary
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug.
+      placeholder: "The app crashes when I click save…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we make the bug happen again?
+      placeholder: |
+        1. Go to…
+        2. Click…
+        3. See error
+    validations:
+      required: true
+
+  - type: input
+    id: expected
+    attributes:
+      label: What should have happened?
+      placeholder: "It should save the file normally"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser, app version etc
+      placeholder: |
+        OS: Linux
+        Browser: Brave
+        Version: 1.0.3
+    validations:
+      required: false
